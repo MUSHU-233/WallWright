@@ -4,6 +4,7 @@ struct DiscoverView: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var downloads: DownloadManager
     @EnvironmentObject private var prefs: Preferences
+    @EnvironmentObject private var favorites: FavoritesStore
     @State private var keyDraft = ""
     @FocusState private var keyFocused: Bool
 
@@ -17,7 +18,7 @@ struct DiscoverView: View {
             }
             if state.results.isEmpty && state.loading {
                 gridSkeleton
-            } else if state.results.isEmpty {
+            } else if state.filtered.isEmpty {
                 empty
             } else {
                 grid
@@ -73,10 +74,57 @@ struct DiscoverView: View {
                 }
                 .padding(.vertical, 1)
             }
+
+            filterBar
         }
         .padding(.horizontal, 28)
         .padding(.top, 42)
         .padding(.bottom, 16)
+    }
+
+    private var filterBar: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 6) {
+                Text("分级")
+                    .font(WW.Font.text(9.5))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 26, alignment: .leading)
+                ForEach(AgeRating.selectable) { rating in
+                    chip(rating.label, active: state.ageFilter.contains(rating)) {
+                        Task { await state.toggleAge(rating) }
+                    }
+                }
+            }
+
+            Rectangle()
+                .fill(.primary.opacity(0.1))
+                .frame(width: 1, height: 16)
+
+            HStack(spacing: 6) {
+                Text("类型")
+                    .font(WW.Font.text(9.5))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 26, alignment: .leading)
+                ForEach(ContentKind.filterable, id: \.self) { kind in
+                    chip(kind.filterLabel, active: state.kindFilter.contains(kind)) {
+                        Task { await state.toggleKind(kind) }
+                    }
+                }
+            }
+
+            if state.isFiltering {
+                Text("\(state.filtered.count) / \(state.results.count)")
+                    .font(WW.Font.text(9.5))
+                    .foregroundStyle(.tertiary)
+                Button("清除") { state.clearFilters() }
+                    .buttonStyle(.plain)
+                    .font(WW.Font.text(9.5))
+                    .foregroundStyle(WW.Palette.accent)
+            }
+
+            Spacer()
+        }
+        .padding(.top, 1)
     }
 
     private func chip(_ label: String, active: Bool, action: @escaping () -> Void) -> some View {
@@ -102,12 +150,19 @@ struct DiscoverView: View {
     private var grid: some View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 14) {
-                ForEach(state.results) { item in
-                    ItemCard(item: item) {
-                        state.detail = item
-                    } onDownload: {
-                        enqueue(item)
-                    }
+                ForEach(state.filtered) { item in
+                    ItemCard(
+                        item: item,
+                        onOpen: { state.detail = item },
+                        onDownload: { enqueue(item) },
+                        isFavorite: favorites.isFavorite(item.id),
+                        onFavorite: {
+                            let nowSaved = favorites.toggle(item)
+                            state.showToast(nowSaved
+                                            ? (favorites.collection(of: item.id).map { "已收藏到「\($0.name)」" } ?? "已收藏")
+                                            : "已取消收藏")
+                        }
+                    )
                 }
             }
             .padding(.horizontal, 28)
@@ -138,17 +193,21 @@ struct DiscoverView: View {
 
     private var empty: some View {
         Group {
-            if let error = state.errorMessage {
+            if state.isFiltering && !state.results.isEmpty {
+                EmptyStateView(symbol: "line.3.horizontal.decrease.circle", title: "没有符合筛选的壁纸",
+                               message: "当前这批结果里没有符合所选分级 / 类型的条目。换一组，或者先往下多加载一些再筛。",
+                               action: ("清除筛选", { state.clearFilters() }))
+            } else if let error = state.errorMessage {
                 EmptyStateView(symbol: "exclamationmark.triangle", title: "没能取到结果",
                                message: error,
-                               action: ("重试", { Task { await state.load(reset: true) } }))
+                               action: ("重试", { Task { await state.reload() } }))
             } else {
                 EmptyStateView(symbol: "sparkle.magnifyingglass", title: "没有匹配的壁纸",
                                message: "换个关键词，或者粘贴一个工坊链接 / ID 直接解析。",
                                action: ("看看热门", {
                                    state.query = ""
                                    state.activeTags = []
-                                   Task { await state.load(reset: true) }
+                                   Task { await state.reload() }
                                }))
             }
         }

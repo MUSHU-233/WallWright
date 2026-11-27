@@ -4,6 +4,9 @@ struct ItemCard: View {
     var item: WorkshopItem
     var onOpen: () -> Void
     var onDownload: () -> Void
+    var isFavorite: Bool = false
+    var onFavorite: (() -> Void)? = nil
+    var onRemove: (() -> Void)? = nil
     @State private var hover = false
 
     private var accent: Color { WW.Palette.tint(for: item.kind) }
@@ -49,6 +52,33 @@ struct ItemCard: View {
             HStack {
                 TagBadge(text: item.kind.label, symbol: item.kind.symbol, tint: .white.opacity(0.92))
                 Spacer()
+                VStack(spacing: 6) {
+                    if let onFavorite {
+                        Button(action: onFavorite) {
+                            Image(systemName: isFavorite ? "heart.fill" : "heart")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(isFavorite ? WW.Palette.coral : .white)
+                                .frame(width: 26, height: 26)
+                                .background(Circle().fill(.black.opacity(0.34)))
+                                .overlay { Circle().strokeBorder(.white.opacity(0.28), lineWidth: 0.7) }
+                        }
+                        .buttonStyle(.plain)
+                        .opacity(isFavorite || hover ? 1 : 0)
+                        .help(isFavorite ? "取消收藏" : "收藏")
+                    }
+                    if let onRemove, hover {
+                        Button(action: onRemove) {
+                            Image(systemName: "trash")
+                                .font(.system(size: 10.5, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 26, height: 26)
+                                .background(Circle().fill(Color.red.opacity(0.62)))
+                                .overlay { Circle().strokeBorder(.white.opacity(0.3), lineWidth: 0.7) }
+                        }
+                        .buttonStyle(.plain)
+                        .help("从收藏中移除")
+                    }
+                }
             }
             .padding(8)
             .frame(maxHeight: .infinity, alignment: .top)

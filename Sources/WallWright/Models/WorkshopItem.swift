@@ -1,7 +1,60 @@
 import Foundation
 
+/// 工坊分级。标签实测分布：Everyone 270 万 / Questionable 19 万 / Mature 38 万
+enum AgeRating: String, CaseIterable, Identifiable, Sendable {
+    case everyone, pg13, r18, unrated
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .everyone: return "全年龄"
+        case .pg13: return "PG13"
+        case .r18: return "R18"
+        case .unrated: return "未标注"
+        }
+    }
+
+    /// 对应的工坊标签，`unrated` 没有标签
+    var tag: String? {
+        switch self {
+        case .everyone: return "Everyone"
+        case .pg13: return "Questionable"
+        case .r18: return "Mature"
+        case .unrated: return nil
+        }
+    }
+
+    /// 界面只给用户三个选项，"未标注"不进筛选栏（实际几乎不存在）
+    static var selectable: [AgeRating] { [.everyone, .pg13, .r18] }
+}
+
+/// 内容类型。Wallpaper Engine 的条目通常同时带 `Wallpaper` 大类和
+/// `Scene`/`Video`/`Web` 之一，所以筛选只看后者。
 enum ContentKind: String, Codable, CaseIterable, Sendable {
     case video, scene, web, image, application, unknown
+
+    /// 可筛选的类型（`Application` 全站仅 1 个条目，不列入）
+    static var filterable: [ContentKind] { [.scene, .video, .web] }
+
+    var filterLabel: String {
+        switch self {
+        case .scene: return "场景"
+        case .video: return "视频"
+        case .web: return "网页"
+        default: return label
+        }
+    }
+
+    /// 对应的工坊标签
+    var filterTag: String? {
+        switch self {
+        case .scene: return "Scene"
+        case .video: return "Video"
+        case .web: return "Web"
+        default: return nil
+        }
+    }
 
     var label: String {
         switch self {
@@ -66,6 +119,15 @@ struct WorkshopItem: Identifiable, Hashable, Codable, Sendable {
 
     var isAudioResponsive: Bool {
         tags.contains("Audio responsive")
+    }
+
+    /// Wallpaper Engine 工坊用 Everyone / Questionable / Mature 三个标签标分级，
+    /// 实测三者加起来几乎覆盖全部条目（270 万 / 19 万 / 38 万）。
+    var ageRating: AgeRating {
+        if tags.contains("Mature") { return .r18 }
+        if tags.contains("Questionable") { return .pg13 }
+        if tags.contains("Everyone") { return .everyone }
+        return .unrated
     }
 
     var displayTags: [String] {

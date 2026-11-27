@@ -20,6 +20,27 @@ enum SteamCMDError: LocalizedError {
     }
 }
 
+/// SteamCMD 的交互提示**不带换行**（输出停在 `password: ` 就不再吐字符），
+/// 所以只按 `\n` 切行是永远识别不到的——必须额外检查缓冲区尾部这个"半行"。
+enum SteamPrompt {
+    enum Kind { case password, guardCode }
+
+    static func detect(in pending: String) -> Kind? {
+        let text = pending.lowercased().trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return nil }
+        if text.hasSuffix("steam guard code:") || text.hasSuffix("steam guard code")
+            || text.hasSuffix("two-factor code:") || text.hasSuffix("two-factor code")
+            || text.hasSuffix("two factor code:") || text.hasSuffix("two factor code") {
+            return .guardCode
+        }
+        // 只认带冒号的形态，避免把 "username/password" 这类普通文本误判成提示
+        if text == "password" || text.hasSuffix("password:") {
+            return .password
+        }
+        return nil
+    }
+}
+
 @MainActor
 final class SteamCMDService: ObservableObject {
     static let shared = SteamCMDService()
@@ -28,10 +49,21 @@ final class SteamCMDService: ObservableObject {
     @Published private(set) var installing = false
     @Published private(set) var installProgress: Double = 0
     @Published private(set) var lastError: String?
+    @Published private(set) var health: String?
+    @Published private(set) var checking = false
 
     private var runningSession: SteamCMDSession?
 
+    /// SteamCMD 不能在含空格的路径下运行：Valve 的 `steamcmd.sh` 第 13 行
+    /// `if [ ! -x ${STEAMEXE} ]` 变量未加引号，路径被空格截断后
+    /// `steamconsole.dylib` 加载失败。所以固定放在无空格的 `~/.wallwright`。
     nonisolated static let root: URL = {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".wallwright/steamcmd", isDirectory: true)
+    }()
+
+    /// 旧版本的安装位置（`Application Support` 含空格，装在这里必然跑不起来）
+    nonisolated static let legacyRoot: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("WallWright/steamcmd", isDirectory: true)
     }()
@@ -43,11 +75,61 @@ final class SteamCMDService: ObservableObject {
     }
 
     init() {
+        Self.purgeLegacyInstall()
         installed = FileManager.default.isExecutableFile(atPath: Self.executable.path)
+    }
+
+    /// 旧版本装在 `Application Support`（含空格）下，那份副本在自我更新时就已经损坏，
+    /// 迁移过来也跑不起来，所以直接清掉，让用户重新装一份干净的。
+    private static func purgeLegacyInstall() {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: legacyRoot.path) else { return }
+        try? fm.removeItem(at: legacyRoot)
     }
 
     func refresh() {
         installed = FileManager.default.isExecutableFile(atPath: Self.executable.path)
+    }
+
+    /// 真的跑一次 `+quit`，确认二进制能被系统加载（仅看文件存在是不够的）
+    func verifyInstall() async -> String? {
+        guard installed else { return "SteamCMD 尚未安装" }
+        guard !Self.root.path.contains(" ") else {
+            return "安装路径含空格，SteamCMD 无法运行：\(Self.root.path)"
+        }
+        let (output, status) = await Task.detached(priority: .userInitiated) {
+            Self.runQuit()
+        }.value
+        if output.contains("Steam Console Client") { return nil }
+        if let fatal = output.split(separator: "\n").first(where: { $0.contains("Fatal Error") }) {
+            return fatal.trimmingCharacters(in: .whitespaces)
+        }
+        return "退出码 \(status)，未检测到 Steam Console Client"
+    }
+
+    func check() async {
+        checking = true
+        health = nil
+        health = await verifyInstall()
+        checking = false
+    }
+
+    nonisolated private static func runQuit() -> (String, Int32) {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["+quit"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        process.standardInput = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return (error.localizedDescription, -1)
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (String(data: data, encoding: .utf8) ?? "", process.terminationStatus)
     }
 
     func install() async {
@@ -57,30 +139,40 @@ final class SteamCMDService: ObservableObject {
         defer { installing = false }
 
         do {
-            try FileManager.default.createDirectory(at: Self.root, withIntermediateDirectories: true)
+            let fm = FileManager.default
+            // 干净重装：旧的残缺文件会让 steamcmd 卡在自我更新循环里
+            if fm.fileExists(atPath: Self.root.path) { try? fm.removeItem(at: Self.root) }
+            try fm.createDirectory(at: Self.root, withIntermediateDirectories: true)
+
             let source = URL(string: "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_osx.tar.gz")!
             let (temp, response) = try await URLSession.shared.download(from: source)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
                 throw SteamCMDError.installFailed("下载安装包失败")
             }
-            installProgress = 0.6
+            installProgress = 0.4
             let archive = Self.root.appendingPathComponent("steamcmd_osx.tar.gz")
-            try? FileManager.default.removeItem(at: archive)
-            try FileManager.default.moveItem(at: temp, to: archive)
+            try? fm.removeItem(at: archive)
+            try fm.moveItem(at: temp, to: archive)
 
             let tar = Process()
             tar.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
             tar.arguments = ["-xzf", archive.path, "-C", Self.root.path]
             try tar.run()
             tar.waitUntilExit()
-            try? FileManager.default.removeItem(at: archive)
+            try? fm.removeItem(at: archive)
             guard tar.terminationStatus == 0 else {
                 throw SteamCMDError.installFailed("解压失败（tar \(tar.terminationStatus)）")
             }
 
-            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: Self.executable.path)
-            installProgress = 1
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: Self.executable.path)
             refresh()
+            installProgress = 0.7
+
+            // 首次运行会自我更新，耗时几十秒，顺便验证二进制真的能被加载
+            if let problem = await verifyInstall() {
+                throw SteamCMDError.installFailed(problem)
+            }
+            installProgress = 1
         } catch {
             lastError = error.localizedDescription
             refresh()
@@ -199,8 +291,29 @@ final class SteamCMDSession {
     }
 
     func cancel() {
+        let pid = process.processIdentifier
+        if process.isRunning { Self.killTree(rootPID: pid) }
         fail(.cancelled)
-        if process.isRunning { process.terminate() }
+    }
+
+    /// `script` 收到 SIGTERM 不会转发给子进程，steamcmd 会变成孤儿继续下载。
+    /// 先按进程树杀，再按安装路径兜底。
+    private static func killTree(rootPID: pid_t) {
+        guard rootPID > 0 else { return }
+        let pkill = "/usr/bin/pkill"
+        for signal in ["-TERM", "-KILL"] {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: pkill)
+            p.arguments = [signal, "-P", String(rootPID)]
+            try? p.run()
+            p.waitUntilExit()
+            if signal == "-TERM" { usleep(200_000) }
+        }
+        let fallback = Process()
+        fallback.executableURL = URL(fileURLWithPath: pkill)
+        fallback.arguments = ["-KILL", "-f", SteamCMDService.root.path + "/steamcmd"]
+        try? fallback.run()
+        fallback.waitUntilExit()
     }
 
     private func startSilenceWatchdog() {
@@ -237,6 +350,22 @@ final class SteamCMDSession {
                 self.buffer.removeSubrange(self.buffer.startIndex..<range.upperBound)
                 self.handle(line: line)
             }
+            self.handlePendingPrompt()
+        }
+    }
+
+    /// 缓冲区里剩下的那半行可能正是 `password: ` / `Steam Guard code:` —— 它们不带换行，
+    /// 不在这里处理就会一直等下去。
+    private func handlePendingPrompt() {
+        switch SteamPrompt.detect(in: buffer) {
+        case .password where !sentPassword:
+            sentPassword = true
+            send(password)
+        case .guardCode where !sentCode:
+            sentCode = true
+            send(guardCodeProvider?() ?? "")
+        default:
+            break
         }
     }
 

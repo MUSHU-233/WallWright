@@ -4,6 +4,7 @@ struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var state: AppState
     @State private var filter: ContentKind?
+    @State private var pendingDelete: LibraryEntry?
 
     private let columns = [GridItem(.adaptive(minimum: 226, maximum: 300), spacing: 14)]
 
@@ -28,6 +29,29 @@ struct LibraryView: View {
             } else {
                 grid
             }
+        }
+        .confirmationDialog(
+            "删除这个壁纸？",
+            isPresented: Binding(get: { pendingDelete != nil },
+                                 set: { if !$0 { pendingDelete = nil } }),
+            presenting: pendingDelete
+        ) { entry in
+            if library.isManaged(entry) {
+                Button("移到废纸篓", role: .destructive) {
+                    state.showToast(library.trash(entry))
+                    pendingDelete = nil
+                }
+            }
+            Button("仅从库中移除") {
+                library.remove(id: entry.id, deleteFiles: false)
+                state.showToast("已从库中移除，文件保留在磁盘上")
+                pendingDelete = nil
+            }
+            Button("取消", role: .cancel) { pendingDelete = nil }
+        } message: { entry in
+            Text(library.isManaged(entry)
+                 ? "\(entry.title)\n\(ByteCountFormatter.string(fromByteCount: entry.size, countStyle: .file))\n文件会被移到废纸篓，之后还能从废纸篓恢复。"
+                 : "\(entry.title)\n这来自 Steam 客户端，只能移除库里的记录，磁盘文件不动。")
         }
     }
 
@@ -89,13 +113,21 @@ struct LibraryView: View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 14) {
                 ForEach(filtered) { entry in
-                    LibraryCard(entry: entry)
+                    LibraryCard(entry: entry) {
+                        pendingDelete = entry
+                    }
                         .contextMenu {
                             Button("在 Finder 中显示") { library.reveal(entry) }
                             Button("设为桌面背景") { library.setWallpaper(for: entry) }
                             Button("打开文件夹") { library.openWithDefault(entry) }
                             Divider()
-                            Button("从库中移除", role: .destructive) { library.remove(id: entry.id, deleteFiles: false) }
+                            if library.isManaged(entry) {
+                                Button("移到废纸篓…", role: .destructive) { pendingDelete = entry }
+                            }
+                            Button("从库中移除", role: .destructive) {
+                                library.remove(id: entry.id, deleteFiles: false)
+                                state.showToast("已从库中移除，文件保留在磁盘上")
+                            }
                         }
                 }
             }
@@ -108,6 +140,7 @@ struct LibraryView: View {
 
 struct LibraryCard: View {
     var entry: LibraryEntry
+    var onDelete: () -> Void
     @EnvironmentObject private var library: LibraryStore
     @State private var hover = false
 
@@ -132,6 +165,7 @@ struct LibraryCard: View {
                         Spacer()
                         iconButton("folder") { library.reveal(entry) }
                         iconButton("display") { library.setWallpaper(for: entry) }
+                        iconButton("trash", danger: true, action: onDelete)
                     }
                     .padding(8)
                     .transition(.opacity)
@@ -170,15 +204,16 @@ struct LibraryCard: View {
         .animation(.easeOut(duration: 0.16), value: hover)
     }
 
-    private func iconButton(_ symbol: String, action: @escaping () -> Void) -> some View {
+    private func iconButton(_ symbol: String, danger: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 9.5, weight: .bold))
                 .foregroundStyle(.white)
                 .frame(width: 24, height: 24)
-                .background(Circle().fill(.black.opacity(0.32)))
+                .background(Circle().fill(danger ? Color.red.opacity(0.62) : Color.black.opacity(0.32)))
                 .overlay { Circle().strokeBorder(.white.opacity(0.28), lineWidth: 0.7) }
         }
         .buttonStyle(.plain)
+        .help(danger ? "删除这个壁纸" : "")
     }
 }

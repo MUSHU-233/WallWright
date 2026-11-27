@@ -39,12 +39,14 @@ struct RootView: View {
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: state.toast)
         .ignoresSafeArea(.container, edges: .top)
+        .task { await state.bootstrap() }
     }
 
     @ViewBuilder
     private var content: some View {
         switch state.route {
         case .discover: DiscoverView()
+        case .favorites: FavoritesView()
         case .library: LibraryView()
         case .downloads: DownloadsView()
         case .settings: SettingsView()

@@ -2,7 +2,7 @@ import SwiftUI
 
 @MainActor
 enum Snapshot {
-    static func runIfRequested() {
+    static func runIfRequested() async {
         guard let index = CommandLine.arguments.firstIndex(of: "--snapshot"),
               CommandLine.arguments.count > index + 1 else { return }
         let dir = CommandLine.arguments[index + 1]
@@ -20,11 +20,19 @@ enum Snapshot {
                 .environmentObject(library)
                 .environmentObject(downloads)
                 .environmentObject(prefs)
-                .environmentObject(steamcmd))
+                .environmentObject(steamcmd)
+                .environmentObject(AuthStore.shared)
+                .environmentObject(FavoritesStore.shared))
         }
 
+        await state.bootstrap()
+
         let shots: [(String, AnyView, CGFloat, CGFloat)] = [
+            ("login", env(LoginView()), 1160, 740),
             ("main", env(RootView()), 1160, 740),
+            ("fav", env(FavoritesView()), 1160, 740),
+            ("settings", env(SettingsView()), 1160, 900),
+            ("about", env(AboutCard()), 760, 340),
             ("hud", env(HUDView()), 400, 320),
             ("detail", env(ItemDetailView(item: sample)), 860, 540),
             ("menu", env(MenuBarPanel()), 344, 460)

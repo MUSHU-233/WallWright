@@ -86,6 +86,7 @@ final class DownloadManager: ObservableObject {
 
     func cancel(_ id: String) {
         cancelRequested = true
+        dismissCode()
         SteamCMDService.shared.cancelCurrent()
         update(id) { job in
             job.state = .cancelled
@@ -158,11 +159,11 @@ final class DownloadManager: ObservableObject {
         do {
             let url = try await SteamCMDService.shared.download(
                 item: item,
-                user: prefs.steamUser,
+                user: prefs.loginUser,
                 password: prefs.steamPassword,
                 guardCodeProvider: { [weak self] in
                     guard let self else { return nil }
-                    return self.blockingGuardCode(title: item.title)
+                    return self.blockingGuardCode(jobID: id, title: item.title)
                 },
                 onProgress: { [weak self] fraction, done, total in
                     Task { @MainActor in
@@ -182,29 +183,37 @@ final class DownloadManager: ObservableObject {
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             update(id) { job in
-                job.state = .failed(message)
+                if job.state != .cancelled {
+                    job.state = .failed(message)
+                }
                 job.speed = 0
             }
         }
     }
 
-    private func blockingGuardCode(title: String) -> String? {
+    /// 从 SteamCMD 的解析线程同步等待用户输入。
+    /// 本函数运行在后台队列，所有 UI 状态改动切回主线程执行。
+    nonisolated private func blockingGuardCode(jobID: String, title: String) -> String? {
         let semaphore = DispatchSemaphore(value: 0)
         let box = Box<String?>(nil)
         DispatchQueue.main.async {
-            self.codeRequest = CodeRequest(itemTitle: title) { code in
-                box.value = code
-                semaphore.signal()
-            }
-            self.jobs.first(where: { $0.state == .running }) .map { _ in () }
-            if let index = self.jobs.firstIndex(where: { $0.item.title == title && $0.state == .running }) {
-                self.jobs[index].state = .awaitingCode
+            MainActor.assumeIsolated {
+                self.codeRequest = CodeRequest(itemTitle: title) { code in
+                    box.value = code
+                    semaphore.signal()
+                }
+                if let index = self.jobs.firstIndex(where: { $0.id == jobID }) {
+                    self.jobs[index].state = .awaitingCode
+                }
             }
         }
         _ = semaphore.wait(timeout: .now() + 300)
         DispatchQueue.main.async {
-            if let index = self.jobs.firstIndex(where: { $0.item.title == title && $0.state == .awaitingCode }) {
-                self.jobs[index].state = .running
+            MainActor.assumeIsolated {
+                if let index = self.jobs.firstIndex(where: { $0.id == jobID }),
+                   self.jobs[index].state == .awaitingCode {
+                    self.jobs[index].state = .running
+                }
             }
         }
         return box.value

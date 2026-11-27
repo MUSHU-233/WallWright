@@ -9,17 +9,26 @@ struct WallWrightApp: App {
     @StateObject private var downloads = DownloadManager.shared
     @StateObject private var prefs = Preferences.shared
     @StateObject private var steamcmd = SteamCMDService.shared
+    @StateObject private var auth = AuthStore.shared
+    @StateObject private var favorites = FavoritesStore.shared
 
     var body: some Scene {
         Window("WallWright", id: "main") {
-            RootView()
-                .environmentObject(state)
-                .environmentObject(library)
-                .environmentObject(downloads)
-                .environmentObject(prefs)
-                .environmentObject(steamcmd)
-                .frame(minWidth: 940, minHeight: 620)
-                .task { await state.bootstrap() }
+            Group {
+                if auth.isSignedIn {
+                    RootView()
+                } else {
+                    LoginView()
+                }
+            }
+            .environmentObject(state)
+            .environmentObject(library)
+            .environmentObject(downloads)
+            .environmentObject(prefs)
+            .environmentObject(steamcmd)
+            .environmentObject(auth)
+            .environmentObject(favorites)
+            .frame(minWidth: 940, minHeight: 620)
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
@@ -33,11 +42,15 @@ struct WallWrightApp: App {
         }
 
         MenuBarExtra {
-            MenuBarPanel()
-                .environmentObject(state)
-                .environmentObject(downloads)
-                .environmentObject(prefs)
-                .environmentObject(library)
+            if auth.isSignedIn {
+                MenuBarPanel()
+                    .environmentObject(state)
+                    .environmentObject(downloads)
+                    .environmentObject(prefs)
+                    .environmentObject(library)
+            } else {
+                SignedOutPanel()
+            }
         } label: {
             Image(systemName: "square.stack.3d.up.fill")
         }
@@ -45,10 +58,31 @@ struct WallWrightApp: App {
     }
 }
 
+struct SignedOutPanel: View {
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "lock.fill")
+                .font(.system(size: 18, weight: .light))
+                .foregroundStyle(.secondary)
+            Text("需要先登录 Steam")
+                .font(WW.Font.rounded(12, .semibold))
+            Button("打开 WallWright") {
+                NSApp.activate(ignoringOtherApps: true)
+                for window in NSApp.windows where window.canBecomeMain {
+                    window.makeKeyAndOrderFront(nil)
+                }
+            }
+            .buttonStyle(CapsuleButtonStyle(kind: .primary))
+        }
+        .padding(20)
+        .frame(width: 240)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--snapshot") {
-            Snapshot.runIfRequested()
+            Task { await Snapshot.runIfRequested() }
             return
         }
         NSApp.setActivationPolicy(.regular)

@@ -3,9 +3,11 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var prefs: Preferences
     @EnvironmentObject private var steamcmd: SteamCMDService
+    @EnvironmentObject private var auth: AuthStore
 
     @State private var password: String = ""
     @State private var key: String = ""
+    @State private var passwordSave: Task<Void, Never>?
 
     var body: some View {
         ScrollView {
@@ -18,6 +20,7 @@ struct SettingsView: View {
                 engineCard
                 apiCard
                 miscCard
+                AboutCard()
             }
             .padding(.horizontal, 28)
             .padding(.top, 42)
@@ -29,6 +32,11 @@ struct SettingsView: View {
             password = prefs.steamPassword
             key = prefs.apiKey
             steamcmd.refresh()
+        }
+        .onDisappear {
+            passwordSave?.cancel()
+            prefs.steamPassword = password
+            prefs.apiKey = key
         }
     }
 
@@ -62,13 +70,37 @@ struct SettingsView: View {
 
                 HStack(spacing: 6) {
                     Image(systemName: "lock.fill").font(.system(size: 8))
-                    Text("凭据保存在系统钥匙串，只用于本地调用 SteamCMD。首次登录需要在悬浮 HUD 里输入 Steam Guard 验证码。")
+                    Text("凭据只存在本机 credentials.json（权限 600），不经过任何第三方服务器。修改账号后需要重新登录。")
                         .font(WW.Font.text(9.5))
                 }
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 8) {
+                    Image(systemName: auth.isSignedIn ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(auth.isSignedIn ? WW.Palette.mint : WW.Palette.coral)
+                    Text(auth.isSignedIn
+                         ? "已登录 \(auth.username.isEmpty ? "" : auth.username)"
+                         : "未登录")
+                        .font(WW.Font.text(10))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if auth.isSignedIn {
+                        Button("退出登录") { auth.signOut() }
+                            .buttonStyle(CapsuleButtonStyle(kind: .ghost))
+                    }
+                }
             }
-            .onChange(of: password) { _, new in prefs.steamPassword = new }
+            // 输入停顿 0.8 秒再落盘。逐字符写会反复触发存储层，也没必要。
+            .onChange(of: password) { _, new in
+                passwordSave?.cancel()
+                passwordSave = Task {
+                    try? await Task.sleep(for: .milliseconds(800))
+                    guard !Task.isCancelled else { return }
+                    prefs.steamPassword = new
+                }
+            }
         }
     }
 
@@ -113,8 +145,29 @@ struct SettingsView: View {
                     NSWorkspace.shared.activateFileViewerSelecting([dir])
                 }
                 .buttonStyle(CapsuleButtonStyle(kind: .ghost))
+
+                if steamcmd.installed {
+                    Button(steamcmd.checking ? "自检中…" : "自检运行") {
+                        Task { await steamcmd.check() }
+                    }
+                    .buttonStyle(CapsuleButtonStyle(kind: .ghost))
+                    .disabled(steamcmd.checking)
+                }
                 Spacer()
             }
+
+            if let health = steamcmd.health {
+                HStack(alignment: .top, spacing: 5) {
+                    Image(systemName: "xmark.octagon.fill").font(.system(size: 9))
+                    Text(health).font(WW.Font.text(10))
+                }
+                .foregroundStyle(WW.Palette.coral)
+            }
+
+            Text(SteamCMDService.root.path)
+                .font(WW.Font.text(9))
+                .foregroundStyle(.tertiary)
+                .textSelection(.enabled)
         }
     }
 
@@ -256,5 +309,114 @@ struct SettingsCard<Content: View>: View {
         .padding(15)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassSurface(radius: WW.Radius.panel, tint: tint, strength: 0.04, shadow: false)
+    }
+}
+
+/// 从设置页抽出来，既能单独预览，也方便以后加"致谢""许可证"之类的内容
+struct AboutCard: View {
+    @StateObject private var updates = UpdateChecker()
+
+    var body: some View {
+        SettingsCard(title: "关于", symbol: "info.circle", tint: WW.Palette.accent) {
+            VStack(alignment: .leading, spacing: 11) {
+                HStack(spacing: 11) {
+                    LogoMark(size: 38)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(AppInfo.displayName).font(WW.Font.rounded(13, .bold))
+                            Text(AppInfo.tagline).font(WW.Font.text(9.5)).foregroundStyle(.tertiary)
+                        }
+                        Text("版本 \(AppInfo.versionText)")
+                            .font(WW.Font.rounded(10, .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+
+                Text(AppInfo.blurb)
+                    .font(WW.Font.text(10))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                aboutRow("作者") {
+                    Text(AppInfo.author).font(WW.Font.text(11))
+                }
+
+                aboutRow("仓库") {
+                    if let url = AppInfo.repoURL {
+                        Button {
+                            NSWorkspace.shared.open(url)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(AppInfo.repoSlug).font(WW.Font.text(11))
+                                Image(systemName: "arrow.up.right.square")
+                                    .font(.system(size: 8.5))
+                            }
+                            .foregroundStyle(WW.Palette.accent)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        Text("未配置（在 Core/AppInfo.swift 里填 repoSlug）")
+                            .font(WW.Font.text(10))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+
+                Divider().opacity(0.4)
+
+                HStack(spacing: 8) {
+                    Button(updates.state == .checking ? "检查中…" : "检查更新") {
+                        Task { await updates.check() }
+                    }
+                    .buttonStyle(CapsuleButtonStyle(kind: .glass))
+                    .disabled(updates.state == .checking)
+
+                    Spacer()
+                    updateStatus
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var updateStatus: some View {
+        switch updates.state {
+        case .idle, .checking:
+            EmptyView()
+        case .upToDate:
+            Label("已是最新版本", systemImage: "checkmark.circle.fill")
+                .font(WW.Font.text(10))
+                .foregroundStyle(WW.Palette.mint)
+        case .available(let version, let url):
+            HStack(spacing: 6) {
+                Text("发现新版本 \(version)")
+                    .font(WW.Font.text(10))
+                    .foregroundStyle(WW.Palette.amber)
+                if let url {
+                    Button("去下载") { NSWorkspace.shared.open(url) }
+                        .buttonStyle(CapsuleButtonStyle(kind: .primary, tint: WW.Palette.amber))
+                }
+            }
+        case .notConfigured:
+            Text("未配置 GitHub 仓库，无法检查")
+                .font(WW.Font.text(10))
+                .foregroundStyle(.tertiary)
+        case .failed(let message):
+            Text(message)
+                .font(WW.Font.text(10))
+                .foregroundStyle(WW.Palette.coral)
+                .lineLimit(2)
+        }
+    }
+
+    private func aboutRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(WW.Font.text(10))
+                .foregroundStyle(.tertiary)
+                .frame(width: 30, alignment: .leading)
+            content()
+            Spacer()
+        }
     }
 }

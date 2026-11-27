@@ -5,6 +5,7 @@ enum SteamAPIError: LocalizedError {
     case http(Int)
     case api(String)
     case empty
+    case offline
 
     var errorDescription: String? {
         switch self {
@@ -12,6 +13,7 @@ enum SteamAPIError: LocalizedError {
         case .http(let code): return "网络请求失败（HTTP \(code)）"
         case .api(let message): return message
         case .empty: return "没有找到结果"
+        case .offline: return "连不上 Steam 服务器，请检查网络或代理后重试"
         }
     }
 }
@@ -54,9 +56,34 @@ actor SteamAPI {
 
     init() {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 25
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 40
+        config.waitsForConnectivity = false
         config.httpAdditionalHeaders = ["User-Agent": "WallWright/1.0 (macOS)"]
         session = URLSession(configuration: config)
+    }
+
+    /// api.steampowered.com 在部分网络下会间歇性连不上（同一秒内可能 000/200 交替），
+    /// 所以网络层错误一律重试，HTTP 错误直接抛出。
+    private func send(_ request: URLRequest, attempts: Int = 4) async throws -> Data {
+        var networkFailure = false
+        for attempt in 0..<attempts {
+            do {
+                let (data, response) = try await session.data(for: request)
+                if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                    throw SteamAPIError.http(http.statusCode)
+                }
+                return data
+            } catch let error as SteamAPIError {
+                throw error
+            } catch {
+                networkFailure = true
+                if attempt < attempts - 1 {
+                    try? await Task.sleep(for: .milliseconds(500 * (attempt + 1)))
+                }
+            }
+        }
+        throw networkFailure ? SteamAPIError.offline : SteamAPIError.api("请求失败")
     }
 
     func details(ids: [String]) async throws -> [WorkshopItem] {
@@ -74,10 +101,7 @@ actor SteamAPI {
             request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
             request.httpBody = body.data(using: .utf8)
 
-            let (data, response) = try await session.data(for: request)
-            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-                throw SteamAPIError.http(http.statusCode)
-            }
+            let data = try await send(request)
             guard
                 let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                 let payload = root["response"] as? [String: Any],
@@ -114,10 +138,7 @@ actor SteamAPI {
         }
         components.queryItems = query
 
-        let (data, response) = try await session.data(from: components.url!)
-        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-            throw SteamAPIError.http(http.statusCode)
-        }
+        let data = try await send(URLRequest(url: components.url!))
         guard
             let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
             let payload = root["response"] as? [String: Any]

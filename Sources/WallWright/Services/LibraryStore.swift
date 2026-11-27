@@ -70,14 +70,45 @@ final class LibraryStore: ObservableObject {
         return entry
     }
 
+    /// 是不是 WallWright 自己下载的文件（在 `~/Library/Application Support/WallWright/Library/` 下）。
+    /// Steam 客户端那份不动——删了 Steam 会重新下，还可能破坏它的记录。
+    func isManaged(_ entry: LibraryEntry) -> Bool {
+        entry.path.contains("/WallWright/")
+    }
+
+    /// 移到废纸篓（可恢复），而不是直接抹掉
+    @discardableResult
+    func trash(_ entry: LibraryEntry) -> String {
+        guard isManaged(entry) else {
+            entries.removeAll { $0.id == entry.id }
+            persist()
+            return "这来自 Steam 客户端，已仅从库中移除，文件没动"
+        }
+        var resulting: NSURL?
+        do {
+            try FileManager.default.trashItem(at: entry.url, resultingItemURL: &resulting)
+        } catch {
+            do {
+                try FileManager.default.removeItem(at: entry.url)
+            } catch {
+                return "删除失败：\(error.localizedDescription)"
+            }
+        }
+        entries.removeAll { $0.id == entry.id }
+        persist()
+        return "已移到废纸篓：\(entry.title)"
+    }
+
     func remove(id: String, deleteFiles: Bool) {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
         let entry = entries[index]
-        if deleteFiles, entry.path.contains("/WallWright/") || entry.path.contains("/Steam/") {
-            try? FileManager.default.removeItem(at: entry.url)
+        if deleteFiles {
+            lastMessage = trash(entry)
+            return
         }
         entries.remove(at: index)
         persist()
+        lastMessage = "已从库中移除：\(entry.title)"
     }
 
     func reveal(_ entry: LibraryEntry) {
